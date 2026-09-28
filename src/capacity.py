@@ -250,6 +250,78 @@ def daily_breakdown(raw: pd.DataFrame, week: WeekInfo, machine_line: str, machin
     return pd.DataFrame([seen[k] for k in ordered_keys])
 
 
+def daily_sku_totals(raw: pd.DataFrame, week: WeekInfo, machine_lines: list[str] | None = None) -> pd.DataFrame:
+    """Day-wise (Monday=offset 0 .. Saturday=offset 5) Planned vs
+    Production totals from the 'weekly production' sheet, summed across
+    ALL machines and BOTH shifts, grouped by Item (SKU).
+
+    `machine_lines` (optional) scopes the totals to only those Machine
+    Line values (column 2) — lets the Fulfillment page's existing
+    "Machine Line(s)" sidebar filter apply to day-wise data too, the
+    same way it already scopes Report For plan's week-level data. `None`
+    (default) keeps all machines/lines, matching the original behavior.
+
+    Confirmed by user 2026-09-28: day-wise fulfillment must come from
+    THIS sheet — 'Report For plan' has no day-level data at all, only
+    weekly totals — combines Shift A + Shift B into one number per day,
+    and is grouped by SKU rather than broken down by machine.
+
+    Day-offset assignment: the week's day-columns are walked in
+    ASCENDING COLUMN-INDEX order, and the first 6 DISTINCT day-labels
+    encountered are assigned offsets 0 (Monday) through 5 (Saturday) —
+    per the user's confirmed rule that a week always starts Monday and
+    ends Saturday (e.g. a week starting 21-09-2026 means its 3rd day,
+    the 23rd, is Wednesday: `week.start + timedelta(days=2)`). This
+    assigns offsets by COLUMN ORDER, not by string-matching "Monday" in
+    the sheet's own label text — the 7th distinct label (the sheet's
+    template "Sunday" column, per LOGIC_PLAN.md Step 2) is excluded
+    entirely, since real weeks are 6 days (matching the Weekly Run
+    Rate's existing [1, 6]-day divisor clamp on the Overview page).
+
+    Units stay raw CFC — the same scale this sheet's own Planned
+    Qty/Production Qty already use, and the same scale 'Report For
+    plan's Booked Week Plan/Produced already use elsewhere on the
+    Fulfillment page — no Tbgs conversion here, so day-wise and
+    week-wise numbers on the same page stay on one consistent scale.
+    """
+    data = load_data_rows(raw)
+    ITEM, MLINE = 0, 2
+    if machine_lines is not None:
+        data = data[data[MLINE].isin(machine_lines)]
+
+    day_offsets: dict[str, int] = {}
+    for c in sorted(week.col_day_shift):
+        day, _shift = week.col_day_shift[c]
+        if day not in day_offsets and len(day_offsets) < 6:
+            day_offsets[day] = len(day_offsets)
+
+    records = []
+    for c in sorted(week.col_day_shift):
+        day, _shift = week.col_day_shift[c]
+        offset = day_offsets.get(day)
+        if offset is None:
+            continue  # 7th/template "Sunday" column — excluded
+        metric = "Planned Qty" if c in week.plan_cols else "Production Qty"
+        vals = pd.to_numeric(data[c], errors="coerce").fillna(0)
+        by_item = vals.groupby(data[ITEM]).sum()
+        for item, val in by_item.items():
+            if item in ("", "nan", "None"):
+                continue
+            records.append({"Day Offset": offset, "Item": item, "Metric": metric, "Value": val})
+
+    if not records:
+        return pd.DataFrame(columns=["Day Offset", "Item", "Planned Qty", "Production Qty"])
+
+    long_df = pd.DataFrame(records)
+    pivoted = long_df.pivot_table(
+        index=["Day Offset", "Item"], columns="Metric", values="Value", aggfunc="sum", fill_value=0
+    ).reset_index()
+    for col in ("Planned Qty", "Production Qty"):
+        if col not in pivoted.columns:
+            pivoted[col] = 0.0
+    return pivoted[["Day Offset", "Item", "Planned Qty", "Production Qty"]]
+
+
 def find_changeover_slots(raw: pd.DataFrame, week: WeekInfo, machine_line: str, machine_no: str | None = None) -> pd.DataFrame:
     """Shift slots where more than one distinct ITEM ran on the same
     physical machine — a changeover. Confirmed by user 2026-09-23:

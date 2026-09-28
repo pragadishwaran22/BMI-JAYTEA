@@ -145,6 +145,22 @@ def compute_fulfillment_kpis(report_for_plan: pd.DataFrame) -> dict:
     }
 
 
+def compute_day_fulfillment(daily_sku: pd.DataFrame, day_offset: int) -> dict:
+    """Plant-wide day-wise KPI, summed across every SKU for one day
+    (Monday=offset 0 .. Saturday=offset 5) — from
+    capacity.daily_sku_totals()'s 'weekly production'-sourced grain, NOT
+    'Report For plan' (confirmed by user 2026-09-28: that sheet has no
+    day-level data at all)."""
+    day_rows = daily_sku[daily_sku["Day Offset"] == day_offset]
+    total_planned = float(day_rows["Planned Qty"].sum())
+    total_produced = float(day_rows["Production Qty"].sum())
+    return {
+        "Day Planned Qty": total_planned,
+        "Day Produced Qty": total_produced,
+        "Day Fulfillment %": (total_produced / total_planned * 100) if total_planned else None,
+    }
+
+
 def compute_funnel(report_for_plan: pd.DataFrame, machine_line: str | None = None) -> dict:
     """Booked Week Plan -> Commited -> Produced funnel, optionally scoped
     to one machine line."""
