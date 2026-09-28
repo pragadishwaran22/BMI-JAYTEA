@@ -1,0 +1,27 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+
+# --- Virtual environment ---
+.venv/
+venv/
+env/
+
+# --- Streamlit ---
+# Keep .streamlit/config.toml (app theme) tracked, but never commit secrets.
+.streamlit/secrets.toml
+
+# --- Editor / tool-specific local config (not part of the app itself) ---
+.vscode/
+.idea/
+.claude/
+
+# --- OS cruft ---
+.DS_Store
+Thumbs.db
+
+# --- Scratch / local test files ---
+*.tmp
+hover_test*.html
