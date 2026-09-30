@@ -323,23 +323,41 @@ def daily_sku_totals(raw: pd.DataFrame, week: WeekInfo, machine_lines: list[str]
 
 
 def find_changeover_slots(raw: pd.DataFrame, week: WeekInfo, machine_line: str, machine_no: str | None = None) -> pd.DataFrame:
-    """Shift slots where more than one distinct ITEM ran on the same
-    physical machine — a changeover. Confirmed by user 2026-09-23:
-    changeovers are keyed on Item changing, not BOM Version — two rows
-    for the SAME Item under different BOM versions sharing a slot is NOT
-    a changeover (it's the same physical product), so items are summed
-    across BOM versions per slot before counting distinct ones.
+    """Changeovers on a physical machine, from two sources (confirmed by
+    user 2026-09-29):
+
+    1. Intra-shift: more than one distinct ITEM ran in the same shift
+       slot. Confirmed by user 2026-09-23: changeovers are keyed on Item
+       changing, not BOM Version — two rows for the SAME Item under
+       different BOM versions sharing a slot is NOT a changeover (it's
+       the same physical product), so items are summed across BOM
+       versions per slot before counting distinct ones.
+    2. Inter-shift (Shift A -> Shift B, same day only — not across a day
+       boundary such as Saturday -> the next Monday): the items running
+       in Shift B differ from the items running in Shift A on the same
+       machine. This is counted IN ADDITION to any intra-shift
+       changeover already counted within Shift A or Shift B
+       individually — e.g. Shift A = {X}, Shift B = {X, Y} contributes
+       one intra-shift changeover (for Shift B's own X/Y overlap) plus
+       one more for the A->B transition, since Shift B's item set as a
+       whole differs from Shift A's. A transition is only counted when
+       BOTH shifts have at least one item running — a shift with zero
+       production isn't a changeover away from or into.
 
     Computed per physical Machine No even when `machine_no` is None (all
     machines on the line) — two different machines both running in
     "Tuesday Shift A" is not a changeover on either one, only multiple
-    items sharing a slot ON THE SAME MACHINE is.
+    items sharing a slot ON THE SAME MACHINE is, and the A->B check is
+    likewise per machine.
 
-    Returns one row per changeover slot: Machine No, Day, Shift, Items
-    (the distinct item names sharing that slot, comma-joined), Item
-    Count, Changeovers (Item Count - 1). The sheet carries no
-    within-shift timestamp, so slots are reported as "items involved",
-    not an ordered A-to-B sequence.
+    Returns one row per changeover: Machine No, Day, Shift, Items, Item
+    Count, Changeovers. Intra-shift rows list the distinct item names
+    sharing that slot (comma-joined) with Changeovers = Item Count - 1.
+    Inter-shift rows use Shift = "Shift A -> Shift B", Items formatted as
+    "<Shift A items> -> <Shift B items>", Item Count = size of the union
+    of both shifts' items, and Changeovers = 1. The sheet carries no
+    within-shift timestamp, so intra-shift slots are reported as "items
+    involved", not an ordered sequence.
     """
     data = load_data_rows(raw)
     ITEM, MLINE, MNO = 0, 2, 3
@@ -355,12 +373,15 @@ def find_changeover_slots(raw: pd.DataFrame, week: WeekInfo, machine_line: str, 
     for mno, mgrp in grp.groupby(MNO):
         vals = mgrp[prod_cols].apply(pd.to_numeric, errors="coerce").fillna(0) if prod_cols else pd.DataFrame(index=mgrp.index)
         items = mgrp[ITEM].astype(str).str.strip()
+
+        day_shift_items: dict[tuple[str, str], list[str]] = {}
         for c in sorted(prod_cols):
             if c not in week.col_day_shift:
                 continue
             day, shift = week.col_day_shift[c]
             nonzero_items = items[vals[c] > 0]
             distinct_items = sorted(set(nonzero_items) - {"", "nan", "None"})
+            day_shift_items[(day, shift)] = distinct_items
             if len(distinct_items) > 1:
                 rows.append({
                     "Machine No": mno, "Day": day, "Shift": shift,
@@ -368,7 +389,58 @@ def find_changeover_slots(raw: pd.DataFrame, week: WeekInfo, machine_line: str, 
                     "Item Count": len(distinct_items),
                     "Changeovers": len(distinct_items) - 1,
                 })
+
+        days = sorted({d for d, _ in day_shift_items})
+        for day in days:
+            a_items = day_shift_items.get((day, "Shift A"), [])
+            b_items = day_shift_items.get((day, "Shift B"), [])
+            if a_items and b_items and set(a_items) != set(b_items):
+                rows.append({
+                    "Machine No": mno, "Day": day, "Shift": "Shift A -> Shift B",
+                    "Items": f"{', '.join(a_items)} -> {', '.join(b_items)}",
+                    "Item Count": len(set(a_items) | set(b_items)),
+                    "Changeovers": 1,
+                })
     return pd.DataFrame(rows, columns=cols)
+
+
+def convert_booked_plan_to_tbgs(
+    report_for_plan: pd.DataFrame, item_master: pd.DataFrame, include_last_week: bool = False,
+) -> tuple[float, list[str]]:
+    """Convert Report For plan's Booked Week Plan (Item-level, CFC scale)
+    to Tbgs via item_master's per-item Tbgs_Per_CFC factor — the same
+    conversion compute_machine_efficiency() already applies to weekly
+    production's Production Qty. Needed so a "Required Run Rate" (Booked
+    Week Plan / remaining days) is directly comparable to the Tbgs/day
+    Weekly Run Rate it's shown next to (confirmed by user 2026-09-29).
+
+    `include_last_week=True` adds "Last Week Plan" (uncommitted carryover)
+    into the per-row total before conversion, giving the "Targeted Tbgs"
+    figure — Booked Week Plan + Last Week Uncommitted Plan, both CFC->Tbgs
+    converted (confirmed by user 2026-09-29) — the same combined demand
+    figure fulfillment.compute_fulfillment_kpis() already sums in CFC
+    scale as "Fulfillment % incl. Last Week Plan"'s denominator.
+
+    Items with no factor are excluded from the total and returned
+    separately (flag, don't guess — same rule as
+    compute_machine_efficiency's "Items Missing Conversion Factor").
+    Returns (total_tbgs, missing_items).
+    """
+    df = report_for_plan.copy()
+    blank = df["Item"].isna() | (df["Item"].astype(str).str.strip().isin(["", "nan", "None"]))
+    df.loc[blank, "Item"] = "(unnamed item)"
+
+    cfc_factor = item_master.set_index("Item_Name")["Tbgs_Per_CFC"]
+    items = df["Item"].astype(str).str.strip()
+    factor = items.map(cfc_factor)
+    has_factor = factor.notna()
+    booked = pd.to_numeric(df["Booked Week Plan"], errors="coerce").fillna(0)
+    if include_last_week and "Last Week Plan" in df.columns:
+        booked = booked + pd.to_numeric(df["Last Week Plan"], errors="coerce").fillna(0)
+
+    total_tbgs = float((booked[has_factor] * factor[has_factor]).sum())
+    missing_items = sorted(items[~has_factor & (booked > 0)].unique().tolist())
+    return total_tbgs, missing_items
 
 
 def find_items_without_cfc_factor(raw: pd.DataFrame, item_master: pd.DataFrame) -> list[str]:
