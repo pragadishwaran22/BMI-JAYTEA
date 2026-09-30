@@ -174,6 +174,13 @@ def _load_dashboard(raw_bytes: bytes, supplement_bytes: bytes | None, uploaded_a
     status_df = status_mod.compute_status(line_eff, line_ful)
     fulfillment_kpis = fulfillment.compute_fulfillment_kpis(rfp)
 
+    # Targeted Tbgs — Total Booked Week Plan + Last Week Uncommitted Plan
+    # for this same week, CFC->Tbgs converted (confirmed by user
+    # 2026-09-29) — the Tbgs-scale counterpart to fulfillment_kpis'
+    # "Fulfillment % incl. Last Week Plan" denominator, shown as its own
+    # KPI pill next to Weekly Run Rate and Overall Fulfillment %.
+    targeted_tbgs, _missing_targeted = capacity.convert_booked_plan_to_tbgs(rfp, item_master, include_last_week=True)
+
     # --- Top/Bottom SKUs by Fulfillment % — replaces the old machine-line
     # "Performance Comparison" widget (confirmed by user 2026-09-24): same
     # ranked-bullet-chart pattern already used on the Fulfillment page's
@@ -235,6 +242,22 @@ def _load_dashboard(raw_bytes: bytes, supplement_bytes: bytes | None, uploaded_a
             if prev_total > 0:
                 prev_run_rate = prev_total / _run_rate_divisor(wk_prev.start)
 
+    # Required Run Rate — the flat daily target ((Booked Week Plan + Last
+    # Week Uncommitted Plan) / 6, CFC->Tbgs converted) for whichever week
+    # Run Rate is anchored to, so the two numbers sit side by side on the
+    # same card and are directly comparable (confirmed by user
+    # 2026-09-29: flat target, not a remaining-need figure that adjusts
+    # for progress already made). Includes Last Week Uncommitted Plan
+    # (confirmed by user 2026-09-29) so this stays consistent with the
+    # Targeted Tbgs pill and Overall Fulfillment %'s own denominator,
+    # rather than a narrower this-week-only plan.
+    required_run_rate = None
+    if run_rate_week_num is not None and str(run_rate_week_num) in weeks_full:
+        rfp_rr = rfp if str(run_rate_week_num) == latest.week_num else \
+            loaders.load_report_for_plan(loaders.make_buffer(raw_bytes), str(run_rate_week_num))
+        booked_plan_tbgs, _missing = capacity.convert_booked_plan_to_tbgs(rfp_rr, item_master, include_last_week=True)
+        required_run_rate = booked_plan_tbgs / 6
+
     return {
         "week_num": latest.week_num,
         "week_label": latest.label,
@@ -245,6 +268,8 @@ def _load_dashboard(raw_bytes: bytes, supplement_bytes: bytes | None, uploaded_a
         "bottom5_sku": bottom5_sku,
         "run_rate": run_rate,
         "prev_run_rate": prev_run_rate,
+        "required_run_rate": required_run_rate,
+        "targeted_tbgs": targeted_tbgs,
     }
 
 
@@ -260,19 +285,17 @@ status_df = result["status_df"]
 st.caption(f"Based on the latest completed week: {result['week_label']}")
 
 # --------------------------------------------------------------------------
-# KPI row — Weekly Run Rate (new) + Fulfillment Overview
+# KPI row — Weekly Run Rate + Overall Fulfillment % + Targeted Tbgs
 # --------------------------------------------------------------------------
-kpi_col1, kpi_col2 = st.columns([1, 1])
+kpi_col1, kpi_col2, kpi_col3 = st.columns([1, 1, 1])
 
 with kpi_col1:
     run_rate = result["run_rate"]
     prev_run_rate = result["prev_run_rate"]
+    required_run_rate = result["required_run_rate"]
     with ui.gold_pill_container("run_rate"):
-        ui.metric_label("Weekly Run Rate (Tbgs/day)", dark=True)
-        ui.plotly_chart(
-            ui.run_rate_card(run_rate, prev_run_rate, TEXT_ON_GOLD),
-            width="stretch",
-        )
+        ui.metric_label("Weekly Run Rate (Tbgs/day)", dark=True, center=True)
+        ui.run_rate_card(run_rate, prev_run_rate, TEXT_ON_GOLD, required_run_rate=required_run_rate)
 
 with kpi_col2:
     kpis = result["fulfillment_kpis"]
@@ -280,13 +303,18 @@ with kpi_col2:
         ui.metric_label("Overall Fulfillment %", dark=True)
         ui.plotly_chart(
             ui.ratio_card(
-                kpis["Overall Fulfillment %"], kpis["Total Produced"], kpis["Total Booked Week Plan"],
+                kpis["Fulfillment % incl. Last Week Plan"], kpis["Total Produced"], kpis["Total Booked Week Plan"],
                 text_color=TEXT_ON_GOLD,
                 last_week_plan=kpis.get("Total Last Week Plan"),
-                pct_incl_last_week=kpis.get("Fulfillment % incl. Last Week Plan"),
             ),
             width="stretch",
         )
+
+with kpi_col3:
+    targeted_tbgs = result["targeted_tbgs"]
+    with ui.gold_pill_container("targeted_tbgs"):
+        ui.metric_label("Targeted Tbgs", dark=True, center=True)
+        ui.big_stat_with_chip(targeted_tbgs, "Booked + Last Week carryover", TEXT_ON_GOLD, exact_suffix=" Tbgs")
 
 st.write("")
 
