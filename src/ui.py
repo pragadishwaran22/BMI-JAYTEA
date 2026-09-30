@@ -685,20 +685,40 @@ def status_badge(status: str) -> str:
     )
 
 
-def kpi_cards(metrics: dict[str, str]):
+def kpi_cards(metrics: dict[str, str], highlight: set[str] | frozenset[str] = frozenset()):
+    """Row of KPI cards, one per (label, value) pair, all in the same
+    st.columns() row so they align and size together. `highlight` (a set
+    of labels) renders those specific cards as a small, round,
+    gold-highlighted pill instead of the default glass card — for a
+    derived/secondary KPI that should read as a quick highlight without
+    breaking out of the row (confirmed by user 2026-09-29, Fulfillment
+    page's Overall Fulfillment %)."""
     cols = st.columns(len(metrics))
     for col, (label, value) in zip(cols, metrics.items()):
         with col:
-            st.markdown(
-                f"""
-                <div class="bi-glass-card" style="padding:1.1rem 1.3rem;">
-                    <div style="font-size:12px;color:{TEXT_SECONDARY};text-transform:uppercase;
-                                letter-spacing:0.04em;">{label}</div>
-                    <div style="font-size:26px;font-weight:700;color:{TEXT_PRIMARY};margin-top:4px;">{value}</div>
-                </div>
-                """,
-                unsafe_allow_html=True,
-            )
+            if label in highlight:
+                st.markdown(
+                    f"""
+                    <div class="bi-glass-card" style="padding:1.1rem 1.3rem;border-radius:999px;
+                                background:{GOLD_SOFT};border-color:{GLASS_BORDER_GOLD};text-align:center;">
+                        <div style="font-size:12px;color:{GOLD};text-transform:uppercase;
+                                    letter-spacing:0.04em;font-weight:700;">{label}</div>
+                        <div style="font-size:26px;font-weight:700;color:{GOLD};margin-top:4px;">{value}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
+            else:
+                st.markdown(
+                    f"""
+                    <div class="bi-glass-card" style="padding:1.1rem 1.3rem;">
+                        <div style="font-size:12px;color:{TEXT_SECONDARY};text-transform:uppercase;
+                                    letter-spacing:0.04em;">{label}</div>
+                        <div style="font-size:26px;font-weight:700;color:{TEXT_PRIMARY};margin-top:4px;">{value}</div>
+                    </div>
+                    """,
+                    unsafe_allow_html=True,
+                )
 
 
 def glass_container(key: str):
@@ -721,18 +741,25 @@ def gold_pill_container(key: str):
     return st.container(key=f"bi_pill_{key}")
 
 
-def metric_label(text: str, dark: bool = False):
+def metric_label(text: str, dark: bool = False, center: bool = False):
     """Small uppercase label matching kpi_cards()'s internal typography —
     put at the top of a glass_container() when its content isn't plain
     HTML kpi_cards() could render the label+value for directly.
 
     `dark=True` swaps to a dark-on-gold color for use inside a
     gold_pill_container(), where the light TEXT_SECONDARY default has no
-    contrast against the gold background."""
+    contrast against the gold background. `center=True` centers the text
+    horizontally instead of the default left alignment; it also nudges
+    the label up slightly (negative margin-top) since gold_pill_container
+    vertically centers its whole label+content block and a centered title
+    otherwise sits a bit low/cramped against the value below it
+    (confirmed by user 2026-09-29)."""
     color = f"{TEXT_ON_GOLD}99" if dark else TEXT_SECONDARY
+    text_align = "center" if center else "left"
+    margin_top = "-10px" if center else "0"
     st.markdown(
         f'<div style="font-size:12px;color:{color};text-transform:uppercase;'
-        f'letter-spacing:0.04em;">{text}</div>',
+        f'letter-spacing:0.04em;text-align:{text_align};margin-top:{margin_top};">{text}</div>',
         unsafe_allow_html=True,
     )
 
@@ -1065,68 +1092,118 @@ def _compact_metric_fig(display_text: str, hover_html: str, text_color: str) -> 
 
 def ratio_card(
     pct: float | None, produced: float, plan: float, text_color: str | None = None,
-    last_week_plan: float | None = None, pct_incl_last_week: float | None = None,
+    last_week_plan: float | None = None,
 ) -> go.Figure:
-    """Two KPIs (e.g. Total Booked Week Plan + Total Produced) merged into
-    one ratio widget — the big % is the display, both raw figures are a
-    hover away instead of two separate KPI cards (2026-09-23). Meant to
-    sit inside a ui.glass_container() (with a ui.metric_label() above it
-    for the title) so it visually matches a kpi_cards() card exactly —
-    this figure itself is fully transparent (no visible fill of its own,
-    just a wide invisible bar for the hover hit-area) so the container's
-    own background/border/blur is what's actually seen.
+    """Overall Fulfillment % widget — the big % is the display, the raw
+    figures behind it are a hover away instead of separate KPI cards
+    (2026-09-23). Meant to sit inside a ui.glass_container() (with a
+    ui.metric_label() above it for the title) so it visually matches a
+    kpi_cards() card exactly — this figure itself is fully transparent
+    (no visible fill of its own, just a wide invisible bar for the hover
+    hit-area) so the container's own background/border/blur is what's
+    actually seen.
 
     `text_color` overrides the default efficiency-band color for the big
     percentage — pass this (e.g. TEXT_ON_GOLD) when the card sits on a
     gold_pill_container(), where green/yellow/red would clash with or
     disappear into the gold background.
 
-    `last_week_plan`/`pct_incl_last_week` (optional) add a second hover
-    section, shown ONLY when `pct > 100` (confirmed by user 2026-09-25):
-    an over-100% total can look alarming on its own, but is often covered
-    by last week's uncommitted carryover plan — same logic
-    fulfillment.classify_overproduction() already applies per-line/SKU,
-    rolled up here to the whole-week total. Shows the recalculated %
-    (Produced / (Booked Week Plan + Last Week Plan)) plus the three raw
-    figures behind it. Omit either arg to skip this section even when
-    pct > 100 (e.g. the caller doesn't have Last Week Plan data).
+    `pct` is Total Produced / (This Week Plan + Last Week Uncommitted
+    Plan) — confirmed by user 2026-09-29 that this combined figure (not
+    Produced / This Week Plan alone) is the one the big % should show.
+    Hover shows the three raw values behind it (Total Produced, Last
+    Week Uncommitted Plan, This Week Plan) with no percentage repeated
+    (confirmed by user 2026-09-29 — the % is already the headline).
     """
     display_pct = pct if pct is not None else 0.0
     color = text_color or (efficiency_color(display_pct) if pct is not None else COLOR_NEUTRAL)
-    hover_lines = [
-        f"Total Produced: {produced:,.0f}",
-        f"Total Booked Week Plan: {plan:,.0f}",
-    ]
-    if pct is not None and pct > 100 and last_week_plan is not None and pct_incl_last_week is not None:
-        # Bug isolated 2026-09-25: this card's hover box silently renders
-        # NOTHING once its hovertemplate has more than 3 "<br>"-separated
-        # lines (a rendering limit of this compact 54px-tall card — no
-        # console error, confirmed via a minimal repro varying line count
-        # alone). So this stays ONE extra line, not four — Current Week
-        # Plan and Produced are already shown in the two lines above, so
-        # only the new figures (Last Week's Uncommitted Qty, the
-        # recalculated %) need to appear here.
-        hover_lines.append(
-            f"Incl. Last Week Plan ({last_week_plan:,.0f}): Fulfillment {pct_incl_last_week:.1f}%"
-        )
+    hover_lines = [f"Total Produced: {produced:,.0f}"]
+    if last_week_plan is not None:
+        hover_lines.append(f"Last Week Uncommitted Plan: {last_week_plan:,.0f}")
+    hover_lines.append(f"This Week Plan: {plan:,.0f}")
     hover_html = "<br>".join(hover_lines)
     return _compact_metric_fig(f"{display_pct:.1f}%" if pct is not None else "N/A", hover_html, color)
 
 
-def run_rate_card(run_rate: float, prev_run_rate: float | None, text_color: str) -> go.Figure:
-    """Weekly Run Rate KPI, abbreviated to Indian Lakh/Crore notation on
-    the card (e.g. "49L") with the exact figure and week-over-week trend
-    revealed on hover — confirmed by user 2026-09-23: the full number was
-    too wide for the widget, and belongs in the hover tooltip instead."""
-    hover_lines = [f"Exact: {run_rate:,.0f} Tbgs/day"]
+def run_rate_card(
+    run_rate: float, prev_run_rate: float | None, text_color: str,
+    required_run_rate: float | None = None,
+):
+    """Weekly Run Rate KPI — big centered Actual number with a small
+    status chip underneath showing the Required target and the
+    shortfall/on-track state ("Option 4" of 5 mockups shown to the user
+    2026-09-29, chosen over a two-equal-numbers layout and a comparison
+    bar — both rejected as not neat enough). Abbreviated to Indian
+    Lakh/Crore notation (confirmed 2026-09-23); the exact figures are a
+    native browser tooltip (title attribute) on the big number and the
+    chip. Renders directly via st.markdown, so call this in place (no
+    ui.plotly_chart() wrapper — it isn't a go.Figure).
+
+    `required_run_rate` (optional) is the flat daily target (Booked Week
+    Plan / 6, CFC->Tbgs converted) for the same week Run Rate is anchored
+    to. Omit it to fall back to just the big Actual number (no chip —
+    there's nothing to compare against).
+    """
+    delta_html = ""
     if prev_run_rate:
         delta_pct = (run_rate - prev_run_rate) / prev_run_rate * 100
         arrow = "▲" if delta_pct >= 0 else "▼"
-        hover_lines.append(f"Previous week: {prev_run_rate:,.0f}")
-        hover_lines.append(f"Change: {arrow} {abs(delta_pct):.1f}%")
-    else:
-        hover_lines.append("(no prior week to compare)")
-    return _compact_metric_fig(format_indian_compact(run_rate), "<br>".join(hover_lines), text_color)
+        delta_html = (
+            f'<div style="font-size:11px;color:{text_color}99;margin-top:4px;" '
+            f'title="Previous week: {prev_run_rate:,.0f} Tbgs/day">{arrow} {abs(delta_pct):.1f}% vs last week</div>'
+        )
+
+    chip_html = ""
+    if required_run_rate is not None:
+        of_target_pct = (run_rate / required_run_rate * 100) if required_run_rate else 0
+        if of_target_pct >= 100:
+            chip_text = f"✓ On track — {of_target_pct:.0f}% of target"
+        else:
+            chip_text = f"⚠ Need {format_indian_compact(required_run_rate)} — {100 - of_target_pct:.0f}% short"
+        chip_html = (
+            '<div style="display:inline-flex;align-items:center;gap:6px;margin-top:8px;'
+            f'background:{text_color}1F;border-radius:999px;padding:5px 14px;font-size:12px;font-weight:700;color:{text_color};" '
+            f'title="Required: {required_run_rate:,.0f} Tbgs/day">{chip_text}</div>'
+        )
+
+    # Every tag's opening stays on ONE line (no attribute wrapped onto the
+    # next) and the whole thing is built with no embedded newlines —
+    # Streamlit's react-markdown HTML-block detection silently fails and
+    # falls back to showing raw text once a tag's attributes span two
+    # source lines (bug hit and isolated 2026-09-29 building this exact
+    # card), unlike kpi_cards()'s plain multi-line triple-quoted HTML
+    # where every tag opens and closes on its own line.
+    st.markdown(
+        '<div style="text-align:center;">'
+        f'<div style="font-size:34px;font-weight:800;color:{text_color};line-height:1;" title="Exact: {run_rate:,.0f} Tbgs/day">{format_indian_compact(run_rate)}</div>'
+        f'{delta_html}'
+        f'{chip_html}'
+        '</div>',
+        unsafe_allow_html=True,
+    )
+
+
+def big_stat_with_chip(value: float, chip_text: str | None, text_color: str, exact_suffix: str = ""):
+    """Single big centered number (Indian Lakh/Crore notation) with an
+    optional small status chip underneath — the single-value counterpart
+    to run_rate_card()'s "Option 4" layout, for a KPI pill that has just
+    one figure to show rather than an Actual/Required pair (confirmed by
+    user 2026-09-29 for the Overview page's Targeted Tbgs pill). Renders
+    directly via st.markdown; call in place (no ui.plotly_chart()
+    wrapper — it isn't a go.Figure)."""
+    chip_html = ""
+    if chip_text:
+        chip_html = (
+            '<div style="display:inline-flex;align-items:center;gap:6px;margin-top:8px;'
+            f'background:{text_color}1F;border-radius:999px;padding:5px 14px;font-size:12px;font-weight:700;color:{text_color};">{chip_text}</div>'
+        )
+    st.markdown(
+        '<div style="text-align:center;">'
+        f'<div style="font-size:34px;font-weight:800;color:{text_color};line-height:1;" title="Exact: {value:,.0f}{exact_suffix}">{format_indian_compact(value)}</div>'
+        f'{chip_html}'
+        '</div>',
+        unsafe_allow_html=True,
+    )
 
 
 def gauge_chart(label: str, value: float) -> go.Figure:
