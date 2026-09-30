@@ -133,16 +133,22 @@ if view_mode == "Week":
     # ---------------- KPI row ----------------
     st.header("1. Overview")
     kpis = fulfillment.compute_fulfillment_kpis(scoped)
-    ui.kpi_cards({
-        "Total Booked Week Plan": f"{kpis['Total Booked Week Plan']:,.0f}",
-        "Total Produced": f"{kpis['Total Produced']:,.0f}",
-        "Overall Fulfillment %": f"{kpis['Overall Fulfillment %']:.1f}%" if kpis['Overall Fulfillment %'] is not None else "N/A",
-    })
+    ui.kpi_cards(
+        {
+            "Total Booked Week Plan": f"{kpis['Total Booked Week Plan']:,.0f}",
+            "Last Week Uncommitted Plan": f"{kpis['Total Last Week Plan']:,.0f}",
+            "Total Produced": f"{kpis['Total Produced']:,.0f}",
+            "Overall Fulfillment %": f"{kpis['Fulfillment % incl. Last Week Plan']:.1f}%" if kpis['Fulfillment % incl. Last Week Plan'] is not None else "N/A",
+        },
+        highlight={"Overall Fulfillment %"},
+    )
 
     st.caption(
         "Fulfillment % reflects what was booked under each machine line's label in "
         "Report For plan — not a guaranteed record of which physical machine produced "
-        "it (see LOGIC_PLAN.md Step 8/9)."
+        "it (see LOGIC_PLAN.md Step 8/9). Overall Fulfillment % = Total Produced / "
+        "(Total Booked Week Plan + Total Last Week Plan uncommitted) — confirmed by "
+        "user 2026-09-29."
     )
 
     # ---------------- Funnel ----------------
