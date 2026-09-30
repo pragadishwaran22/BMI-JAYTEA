@@ -284,8 +284,11 @@ else:
 st.subheader("Changeovers")
 st.caption(
     "A changeover is a different ITEM running in the same shift slot on the same "
-    "physical machine — two rows for the same item under different BOM versions "
-    "sharing a slot does NOT count (same product, confirmed by user 2026-09-23). "
+    "physical machine (two rows for the same item under different BOM versions "
+    "sharing a slot does NOT count — same product, confirmed by user 2026-09-23), "
+    "OR a different item set running in Shift B vs Shift A on the same day, same "
+    "machine (confirmed by user 2026-09-29 — checked same-day only, not across a "
+    "day boundary). "
     f"Each changeover is estimated at {CHANGEOVER_MINUTES_DEFAULT} min of downtime "
     "(a default placeholder, not yet a real per-machine number)."
 )
