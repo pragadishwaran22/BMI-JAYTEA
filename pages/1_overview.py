@@ -11,6 +11,7 @@ import loaders  # noqa: E402
 import capacity  # noqa: E402
 import fulfillment  # noqa: E402
 import status as status_mod  # noqa: E402
+import supabase_store  # noqa: E402
 import ui  # noqa: E402
 from constants import TEXT_ON_GOLD, COLOR_GOOD, COLOR_CRITICAL, COLOR_NEUTRAL  # noqa: E402
 
@@ -92,8 +93,13 @@ uploaded_at = st.session_state.get("weekly_workbook_uploaded_at", date.today())
 _loader = ui.tea_brewing_loader("Brewing your dashboard…")
 
 
+db_factors, db_error = supabase_store.fetch_factors()
+if db_error:
+    st.caption(f"⚠ Couldn't load saved conversion factors from Supabase ({db_error}) — using the bundled files only.")
+
+
 @st.cache_data(show_spinner=False)
-def _load_dashboard(raw_bytes: bytes, supplement_bytes: bytes | None, uploaded_at: date):
+def _load_dashboard(raw_bytes: bytes, supplement_bytes: bytes | None, uploaded_at: date, db_factors: pd.DataFrame):
     mc_master = loaders.load_mc_master(str(MC_MASTER_PATH))
     item_master = loaders.load_item_master(str(ITEM_MASTER_PATH))
     item_master = loaders.merge_item_master(
@@ -102,6 +108,7 @@ def _load_dashboard(raw_bytes: bytes, supplement_bytes: bytes | None, uploaded_a
     if supplement_bytes:
         supplement_df = loaders.load_item_master_supplement(loaders.make_buffer(supplement_bytes))
         item_master = loaders.merge_item_master(item_master, supplement_df)
+    item_master = loaders.merge_item_master(item_master, db_factors)
 
     weeks_full = loaders.list_report_for_plan_weeks(loaders.make_buffer(raw_bytes))
     full_weeks = sorted((w for w in weeks_full.values() if w.is_full), key=lambda w: int(w.week_num))
@@ -198,23 +205,24 @@ def _load_dashboard(raw_bytes: bytes, supplement_bytes: bytes | None, uploaded_a
     # Run Rate tracks the numerically latest week with ANY real
     # production — including one still in progress — and divides by how
     # many calendar days of that week have actually elapsed
-    # ((today - week start) + 1, clamped to [1, 6]) instead of always 6.
-    # A week already fully finished naturally clamps to 6, same as
-    # before; a week still in progress (e.g. WEEK NO-39, start 21-09,
-    # viewed on 22-09) gets the correct smaller divisor (2, not 6) instead
-    # of understating the true daily rate. Anchored to the date PARSED
-    # FROM THE WORKBOOK'S FILE NAME (`uploaded_at` /
-    # `loaders.parse_workbook_filename_date`), not the live wall-clock date
-    # — corrected by user 2026-09-24: the same workbook file must always
-    # produce the same Run Rate, based on the date the file itself carries.
-    # Scoped to Run Rate only (confirmed by user) — the "latest completed
-    # week" picker above deliberately keeps using the live `today` instead.
+    # (filename_date - week_start, clamped to [1, 6], NO +1 — confirmed
+    # by user 2026-09-30) instead of always 6. A week already fully
+    # finished naturally clamps to 6, same as before; a week still in
+    # progress (e.g. WEEK NO-39, start 21-09, filename dated 22-09) gets
+    # the correct smaller divisor instead of understating the true daily
+    # rate. Anchored to the date PARSED FROM THE WORKBOOK'S FILE NAME
+    # (`uploaded_at` / `loaders.parse_workbook_filename_date`), not the
+    # live wall-clock date — corrected by user 2026-09-24: the same
+    # workbook file must always produce the same Run Rate, based on the
+    # date the file itself carries. Scoped to Run Rate only (confirmed by
+    # user) — the "latest completed week" picker above deliberately keeps
+    # using the live `today` instead.
     run_rate_as_of = uploaded_at
 
     def _run_rate_divisor(wk_start) -> int:
         if wk_start is None:
             return 6
-        return min(max((run_rate_as_of - wk_start).days + 1, 1), 6)
+        return min(max((run_rate_as_of - wk_start).days, 1), 6)
 
     all_week_nums = sorted(int(k.replace("WEEK NO-", "")) for k in wk_infos)
     run_rate = 0.0
@@ -273,7 +281,7 @@ def _load_dashboard(raw_bytes: bytes, supplement_bytes: bytes | None, uploaded_a
     }
 
 
-result = _load_dashboard(raw_bytes, supplement_bytes, uploaded_at)
+result = _load_dashboard(raw_bytes, supplement_bytes, uploaded_at, db_factors)
 
 if result is None:
     _loader.empty()
