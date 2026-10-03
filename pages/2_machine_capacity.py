@@ -1,3 +1,4 @@
+import hashlib
 import sys
 from pathlib import Path
 
@@ -11,8 +12,9 @@ import loaders  # noqa: E402
 import capacity  # noqa: E402
 import fulfillment  # noqa: E402
 import status as status_mod  # noqa: E402
+import supabase_store  # noqa: E402
 import ui  # noqa: E402
-from constants import efficiency_color, GOLD, GOLD_DARK, CHANGEOVER_MINUTES_DEFAULT  # noqa: E402
+from constants import efficiency_color, GOLD, GOLD_DARK, CHANGEOVER_MINUTES_DEFAULT, COLOR_CRITICAL  # noqa: E402
 
 MC_MASTER_PATH = Path(__file__).parent.parent / "source data" / "MC MASTER.xlsx"
 ITEM_MASTER_PATH = Path(__file__).parent.parent / "source data" / "Item Master.xlsx"
@@ -34,8 +36,13 @@ supplement_bytes = st.session_state.get("item_master_supplement_bytes")
 _loader = ui.tea_brewing_loader("Brewing your dashboard…")
 
 
+db_factors, db_error = supabase_store.fetch_factors()
+if db_error:
+    st.caption(f"⚠ Couldn't load saved conversion factors from Supabase ({db_error}) — using the bundled files only.")
+
+
 @st.cache_data(show_spinner=False)
-def _load_base(raw_bytes: bytes, supplement_bytes: bytes | None):
+def _load_base(raw_bytes: bytes, supplement_bytes: bytes | None, db_factors: pd.DataFrame):
     mc_master = loaders.load_mc_master(str(MC_MASTER_PATH))
     item_master = loaders.load_item_master(str(ITEM_MASTER_PATH))
     item_master = loaders.merge_item_master(
@@ -44,13 +51,14 @@ def _load_base(raw_bytes: bytes, supplement_bytes: bytes | None):
     if supplement_bytes:
         supplement_df = loaders.load_item_master_supplement(loaders.make_buffer(supplement_bytes))
         item_master = loaders.merge_item_master(item_master, supplement_df)
+    item_master = loaders.merge_item_master(item_master, db_factors)
     prod_raw = loaders.load_weekly_production_raw(loaders.make_buffer(raw_bytes))
     date_ranges = loaders.load_week_date_ranges(loaders.make_buffer(raw_bytes))
     weeks = loaders.discover_weeks(prod_raw, date_ranges)
     return mc_master, item_master, prod_raw, weeks
 
 
-mc_master, item_master, prod_raw, weeks = _load_base(raw_bytes, supplement_bytes)
+mc_master, item_master, prod_raw, weeks = _load_base(raw_bytes, supplement_bytes, db_factors)
 
 if not weeks:
     _loader.empty()
@@ -190,17 +198,60 @@ if not incomplete.empty:
 
 # Workbook-wide (every week block, not just the one selected above) list of
 # items with no CFC->Tbgs factor at all — catches new SKUs before they show
-# up as an "Unconverted Qty" flag on some future week. Copy this list back
-# to Claude to get a fillable mapping form for just these items
+# up as an "Unconverted Qty" flag on some future week. When Supabase is
+# configured the factor is entered right here and saved for every session
+# (2026-10-03); otherwise the list can still be copied out and mapped by hand
 # (2026-09-23 — see the "CFC Conversion Mapping" artifact workflow).
+saved_count = st.session_state.pop("cfc_saved_count", 0)
+if saved_count:
+    st.success(f"Saved {saved_count} conversion factor(s) — everything above is recalculated with them.")
+
 all_unmatched = capacity.find_items_without_cfc_factor(prod_raw, item_master)
 if all_unmatched:
     with st.expander(f"📋 {len(all_unmatched)} item(s) in this workbook have no CFC → Tbgs conversion factor at all (any week)"):
-        st.caption(
-            "Copy this list and send it to Claude to generate a fillable mapping form for just these "
-            "items, the same way the first 40 were mapped."
-        )
-        st.text_area("Unmatched items", value="\n".join(all_unmatched), height=200, key="unmatched_items_textarea")
+        if supabase_store.is_configured():
+            st.caption(
+                "Enter both values for each item you know, then save. Factors are stored in Supabase and "
+                "apply for every user and every upload. Items left at 0 are skipped."
+            )
+            with st.form("cfc_factor_form"):
+                header = st.columns([5, 1.6, 1.6])
+                header[0].caption("Item")
+                header[1].caption("Ctn per CFC")
+                header[2].caption("Tbgs per ctn")
+                # Keyed by a hash of the item name (not its list position) so that
+                # once saved items drop off the list, the remaining rows keep
+                # their own typed values instead of inheriting a neighbor's.
+                keys = {name: hashlib.md5(name.encode("utf-8")).hexdigest()[:12] for name in all_unmatched}
+                for item_name in all_unmatched:
+                    row = st.columns([5, 1.6, 1.6])
+                    row[0].text(item_name)
+                    row[1].number_input("Ctn per CFC", min_value=0.0, step=1.0, value=0.0,
+                                        key=f"cfc_ctn_{keys[item_name]}", label_visibility="collapsed")
+                    row[2].number_input("Tbgs per ctn", min_value=0.0, step=1.0, value=0.0,
+                                        key=f"cfc_tbgs_{keys[item_name]}", label_visibility="collapsed")
+                submitted = st.form_submit_button("Save factors")
+            if submitted:
+                to_save = [
+                    (item_name, st.session_state[f"cfc_ctn_{keys[item_name]}"], st.session_state[f"cfc_tbgs_{keys[item_name]}"])
+                    for item_name in all_unmatched
+                    if st.session_state[f"cfc_ctn_{keys[item_name]}"] > 0 and st.session_state[f"cfc_tbgs_{keys[item_name]}"] > 0
+                ]
+                if not to_save:
+                    st.warning("Enter both values for at least one item.")
+                else:
+                    save_error = supabase_store.save_factors(to_save)
+                    if save_error:
+                        st.error(save_error)
+                    else:
+                        st.session_state["cfc_saved_count"] = len(to_save)
+                        st.rerun()
+        else:
+            st.caption(
+                "Supabase isn't configured, so factors can't be saved from here. Copy this list and add the "
+                "items to Item Master Supplement.xlsx instead."
+            )
+            st.text_area("Unmatched items", value="\n".join(all_unmatched), height=200, key="unmatched_items_textarea")
         st.download_button(
             "Download list as .txt",
             "\n".join(all_unmatched).encode("utf-8"),
@@ -356,11 +407,22 @@ bottom5 = ranked.tail(5).sort_values("Efficiency %", ascending=True)
 # No Plan here at all (show_plan=False) — Booked Week Plan is a different
 # unit (CFC) and isn't part of this comparison (confirmed by user
 # 2026-09-23 — this chart is Capacity vs Production only).
+#
+# Bars stay the default gold (no Status-based coloring) and the hover box
+# is only colored when Production exceeds Capacity — the one state that's
+# genuinely unusual and worth flagging, matching the Fulfillment page's
+# Top 5 SKUs chart pattern of a plain gold bar + a colored hover box for
+# an outlier case (confirmed by user 2026-09-30). Unlike that SKU chart,
+# there's no "explained by Last Week Plan carryover" middle state here —
+# Capacity vs Production has no Plan/Last-Week-Plan concept to explain an
+# overrun with, so this is a two-state rule (flag vs no flag), not three.
 def _perf_row(r):
+    over_capacity = r["Actual Production (Tbgs)"] > r["Total Available (Tbgs)"]
     return {
         "name": r["Machine Line"], "capacity": r["Total Available (Tbgs)"],
         "production": r["Actual Production (Tbgs)"], "plan": 0,
-        "status": r.get("Status") if status_df is not None else None,
+        "color": COLOR_CRITICAL if over_capacity else None,
+        "hover_note": "<br><br><b>Production exceeds Capacity — needs investigation</b>" if over_capacity else "",
     }
 
 
